@@ -4,11 +4,11 @@ Implementation of various foundational models from scratch
 ### 1. tinyshakLM
 `tinyshakLM` is a tiny (~5M) GPT-inspired model, trained on the entirety of Shakespeare's plays, designed to generate content reminiscent of Shakespeare's style.<br>
 
-<img src="https://github.com/krishhrana/languageModels/blob/main/shakespeare.png" width="256"> <br>
+<img src="https://github.com/krishhrana/languageModels/blob/main/miniGPT/shakespeare.png" width="256"> <br>
 It implements a character-level decoder-only transformer model with Masked Multi-Head Attention and it is trained on the 
 [tiny-shakespeare](https://github.com/karpathy/char-rnn/blob/master/data/tinyshakespeare/input.txt) dataset. It also implements various decoding strategies such as controlling `temperature` and `top-p` for character-level language generation
 
-![Loss Curve](https://github.com/krishhrana/languageModels/blob/main/tinyShakLM%20-%20loss_curve.png)
+![Loss Curve](https://github.com/krishhrana/languageModels/blob/main/miniGPT/tinyShakLM%20-%20loss_curve.png)
 
 A sample text generated from the model: 
 ```
