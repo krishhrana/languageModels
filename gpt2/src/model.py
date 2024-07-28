@@ -1,7 +1,10 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from dataclasses import dataclass
 import math
+
+from torch.utils.data.dataloader import _BaseDataLoaderIter
 
 
 class SelfAttention(torch.nn.Module):
@@ -170,6 +173,7 @@ class GPT2(torch.nn.Module):
         )
         self.lm_head = torch.nn.Linear(config.n_embed, config.n_vocab, bias = False) # input: (B, T, n_embed) output: (B, T, n_vocab)
 
+        self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx, target=None): 
         B, T = idx.shape
@@ -185,7 +189,7 @@ class GPT2(torch.nn.Module):
         logits = self.lm_head(x) # (B, T, n_vocab)
         loss = None
         if target is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), target.view(-1)) # (B*T, vocab_size), (B*T)
+            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1)) # (B*T, vocab_size), (B*T)
         return logits, loss
     
 
@@ -245,58 +249,93 @@ class GPT2(torch.nn.Module):
 
 import tiktoken as tk
 
+class ShakespeareLoader(DataLoader):
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        tokenizer = tk.get_encoding('gpt2')
+        with open('gpt2/src/input.txt') as f:
+            text = f.read()
+
+        self.text_tokens = tokenizer.encode(text)
+        self.text_tokens = torch.tensor(self.text_tokens, dtype = torch.long)
+        print(f"Num Tokens: {len(self.text_tokens)}")
+        rem = len(self.text_tokens) % (B * (T + 1))
+        print(f"REM: {rem}")
+        self.text_tokens = self.text_tokens[:-rem]
+        print(f"Truncaated tokens: {len(self.text_tokens)}")
+        self.text_tokens = self.text_tokens.contiguous().view(-1, B, T + 1)
+
+    def __len__(self):
+        return self.text_tokens.shape[0]
+    
+
+    def __iter__(self):
+        idx = 0
+        while idx < self.text_tokens.shape[0]:
+            x, y = self.text_tokens[idx, :, :-1], self.text_tokens[idx, :, 1:]
+            yield x, y
+    
+
+train_loader = ShakespeareLoader(B = 4, T = 1024)
 
 model = GPT2(GPT2Config())
 
-with open('gpt2/src/input.txt') as f:
-    text = f.read()
-
-tokenizer = tk.get_encoding('gpt2')
-tokens = tokenizer.encode(text[:2000])
-
-B, T = 4, 32
-
-subset = torch.tensor(tokens)[: B*T + 1]
-x, y = subset[:-1].view(B, T), subset[1:].view(B, T)
-
-logits, loss = model.forward(x, y)
-
-print(logits.shape)
-print(loss)
-
 optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
-for i in range(50):
+
+
+for i, (x, y) in enumerate(train_loader):
     optimizer.zero_grad()
     logits, loss = model.forward(x, y)
     loss.backward()
     optimizer.step()
     print(f"Iteration {i + 1}: Loss {loss.item()}")
 
+    if i == 5: 
+        break
 
-tokenizer = tk.get_encoding('gpt2')
-prompt = "First Citizen:"
-tokens = tokenizer.encode(prompt)
-tokens = torch.tensor(tokens, dtype=torch.long)
 
-x = tokens.unsqueeze(dim = 0) # (1, T)
+    
 
-torch.manual_seed(42)
-with torch.no_grad():
-    for i in range(30):
-        # x ---> (B, T)
-        logits = model.forward(x)[0] # (B, T, vocab_size)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits, dim = -1) # (B, vocab_size)
-        # This gets the top-k tokens with max probailities
-        topk_probs, topk_idx = torch.topk(probs, k = 50, dim = -1) # (B, 50)
-        # torch.multinomial sample randomly according to a probability distribution, output is the index of the values that it sampled
-        sampled_prob_idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
-        # Index into the top_k tokens array to get the token ids
-        token_idx = torch.gather(topk_idx, dim = -1, index=sampled_prob_idx)
-        x = torch.cat([x, token_idx], dim = -1) # (B, T + 1)
 
-x = x.tolist()
-print(len(x), len(x[0]))
-generations = tokenizer.decode_batch(x)
-for i in generations:
-    print(i)
+# logits, loss = model.forward(x, y)
+
+# print(logits.shape)
+# print(loss)
+
+# optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
+# for i in range(50):
+#     optimizer.zero_grad()
+#     logits, loss = model.forward(x, y)
+#     loss.backward()
+#     optimizer.step()
+#     print(f"Iteration {i + 1}: Loss {loss.item()}")
+
+
+# tokenizer = tk.get_encoding('gpt2')
+# prompt = "First Citizen:"
+# tokens = tokenizer.encode(prompt)
+# tokens = torch.tensor(tokens, dtype=torch.long)
+
+# x = tokens.unsqueeze(dim = 0) # (1, T)
+
+# torch.manual_seed(42)
+# with torch.no_grad():
+#     for i in range(30):
+#         # x ---> (B, T)
+#         logits = model.forward(x)[0] # (B, T, vocab_size)
+#         logits = logits[:, -1, :]
+#         probs = F.softmax(logits, dim = -1) # (B, vocab_size)
+#         # This gets the top-k tokens with max probailities
+#         topk_probs, topk_idx = torch.topk(probs, k = 50, dim = -1) # (B, 50)
+#         # torch.multinomial sample randomly according to a probability distribution, output is the index of the values that it sampled
+#         sampled_prob_idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
+#         # Index into the top_k tokens array to get the token ids
+#         token_idx = torch.gather(topk_idx, dim = -1, index=sampled_prob_idx)
+#         x = torch.cat([x, token_idx], dim = -1) # (B, T + 1)
+
+# x = x.tolist()
+# print(len(x), len(x[0]))
+# generations = tokenizer.decode_batch(x)
+# for i in generations:
+#     print(i)
