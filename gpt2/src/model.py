@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -87,6 +88,7 @@ class Attention(torch.nn.Module):
         super().__init__()
         self.c_attn = torch.nn.Linear(config.n_embed, 3 * config.n_embed)
         self.c_proj = torch.nn.Linear(config.n_embed, config.n_embed)
+        self.c_proj.RESIDUAL_SCALE = True
         self.n_embed = config.n_embed
         self.n_heads = config.n_heads
         self.register_buffer('bias', torch.tril(torch.ones(size=(config.n_block, config.n_block))).view(1, 1, config.n_block, config.n_block))
@@ -125,6 +127,7 @@ class MLP(torch.nn.Module):
         self.c_fc = torch.nn.Linear(config.n_embed, 4 * config.n_embed)
         self.gelu = torch.nn.GELU(approximate='tanh')
         self.c_proj = torch.nn.Linear(4 * config.n_embed, config.n_embed)
+        self.c_proj.RESIDUAL_SCALE = True
 
     def forward(self, x): 
         x = self.c_fc(x)
@@ -173,7 +176,21 @@ class GPT2(torch.nn.Module):
         )
         self.lm_head = torch.nn.Linear(config.n_embed, config.n_vocab, bias = False) # input: (B, T, n_embed) output: (B, T, n_vocab)
 
+        # Weight tying
         self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, torch.nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std = 0.02)
+        if isinstance(module, torch.nn.Linear): 
+            torch.nn.init.normal_(module.weight, mean = 0, std = 0.02)
+            if module.bias is not None:
+                torch.nn.init.constant_(module.bias, val = 0.0)
+            if hasattr(module, 'RESIDUAL_SCALE'): 
+                module.weight = (2 * self.config.n_layer)**(-0.5) * module.weight
+
 
     def forward(self, idx, target=None): 
         B, T = idx.shape
@@ -277,18 +294,26 @@ class ShakespeareLoader(DataLoader):
             yield x, y
     
 
-train_loader = ShakespeareLoader(B = 4, T = 1024)
+train_loader = ShakespeareLoader(B = 6, T = 1024)
+
+print(len(train_loader))
 
 model = GPT2(GPT2Config())
+
+model = torch.compile(model)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
 
 
 for i, (x, y) in enumerate(train_loader):
     optimizer.zero_grad()
+    start_time = time.time()
     logits, loss = model.forward(x, y)
     loss.backward()
     optimizer.step()
+    end_time = time.time()
+    print(f'Epoch {i + 1}: {end_time - start_time}')
+    print(f"Training at {(train_loader.B * train_loader.T) / (end_time - start_time)} tok/s")
     print(f"Iteration {i + 1}: Loss {loss.item()}")
 
     if i == 5: 
