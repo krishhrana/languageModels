@@ -1,214 +1,141 @@
-import time
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from dataclasses import dataclass
+from model_config import GPT2Config
 import math
 
-from torch.utils.data.dataloader import _BaseDataLoaderIter
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-class SelfAttention(torch.nn.Module):
-    def __init__(self, config):
+
+class MLP(torch.nn.Module): 
+    def __init__(self, config: GPT2Config): 
         super().__init__()
-        self.query = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.key = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.value = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.mask = torch.tril(torch.ones(size=(config.n_block, config.n_block))).view(1, config.n_block, config.n_block)
+        
+        self.c_fc = torch.nn.Linear(config.d_model, 4 * config.d_model)
+        self.activation = torch.nn.GELU(approximate='tanh')
+        self.c_proj = torch.nn.Linear(4 * config.d_model, config.d_model)
+        self.c_proj.SCALE_FLAG = 1
 
-
-    def forward(self, x):
-        B, T, C = x.shape()
-        q = self.query(x) # (B, T, C)
-        kT = self.key(x).transpose(-1, -2) # (B, C, T)
-        v = self.value(x) # (B, T, C)
-
-        scaled_dot_prod = (q @ kT) * 1/math.sqrt(C) # (B, T, T)
-        scaled_dot_prod = scaled_dot_prod.masked_fill(self.mask[:, :T, :T] == 0, float('-inf')) # (B, T, T)
-        affinities = F.softmax(scaled_dot_prod, dim = -1)
-
-        weighted_hs = affinities @ v
-        return weighted_hs 
-
-
-class MultiHeadAttention():
-    def __init__(self, config): 
-        super().__init__()
-        self.config = config
-
-        # Just use one linear layer to project q, k, v together and split them later
-        self.query = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.key = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.value = torch.nn.Linear(config.n_embed, config.n_embed)
-
-        self.proj = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.mask = torch.tril(torch.ones(size=(config.n_block, config.n_block))).view(1, 1, config.n_block, config.n_block)
-
+    
     def forward(self, x): 
-        B, T, C = x.shape
-        q = self.query(x) # (B, T, C)
-        k = self.key(x) # (B, T, C)
-        v = self.value(x) # (B, T, C)
-
-        mini_head_dim = C // self.config.n_heads
-
-        # (B, T, n_heads, mini_dim) ---> (B, n_heads, T, mini_dims) ---> we want to parallelize across mini_heads
-        q_mini = q.view(B, T, self.config.n_heads, mini_head_dim).permute(0, 2, 1, 3)
-        # (B, T, n_heads, mini_dims) ---> (B, n_heads, mini_dims, T)
-        kT = k.view(B, T, self.config.n_heads, mini_head_dim).permute(0, 2, 3, 1)
-        # (B, n_heads, T, mini_head_dim)
-        v = v.view(B, T, self.config.n_heads, mini_head_dim).permute(0, 2, 1, 3)
-
-        print(f"q_mini: {q_mini.shape}")
-        print(f"k: {kT.shape}")
-        print(f"v: {v.shape}")
-
-        print(mini_head_dim)
-        print(kT.size(-1))
-
-        scaled_dot_prod = (q_mini @ kT) * 1.0/math.sqrt(mini_head_dim) # (B, n_heads, T, T)
-        scaled_dot_prod = scaled_dot_prod.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
-
-        affinities = F.softmax(scaled_dot_prod, dim = -1)
-        print(affinities[0, 0, :, :])
-        affinities = affinities @ v # (B, n_heads, T, mini_head_dims)
-
-        affinities = affinities.permute(0, 2, 1, 3).contiguous().view(B, T, C)
-        print(f"affinities: {affinities.shape}")
-        affinities = self.proj(affinities)
-        return affinities
-    
+       x = self.c_fc(x)
+       x = self.activation(x)
+       x = self.c_proj(x)
+       return x
 
 
-
-    
 
 class Attention(torch.nn.Module): 
-    def __init__(self, config):
+    def __init__(self, config: GPT2Config): 
         super().__init__()
-        self.c_attn = torch.nn.Linear(config.n_embed, 3 * config.n_embed)
-        self.c_proj = torch.nn.Linear(config.n_embed, config.n_embed)
-        self.c_proj.RESIDUAL_SCALE = True
-        self.n_embed = config.n_embed
+
+        self.c_attn = torch.nn.Linear(config.d_model, 3 * config.d_model)
+        self.c_proj = torch.nn.Linear(config.d_model, config.d_model)
+        self.c_proj.SCALE_FLAG = 1
+
+        self.d_model = config.d_model
         self.n_heads = config.n_heads
-        self.register_buffer('bias', torch.tril(torch.ones(size=(config.n_block, config.n_block))).view(1, 1, config.n_block, config.n_block))
+
+        self.register_buffer("bias", tensor=torch.tril(torch.ones(size=(config.block_size, config.block_size))).view(1, 1, config.block_size, config.block_size))
+
+
 
     def forward(self, x): 
-        B, T, C = x.shape
-        # (B, T, 3*C)
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embed, dim = -1) # (B, T, C)
+        # x ---> [B, T, C]
+        B, T, C = x.size()
 
-        mini_head_dim = C // self.n_heads
+        # Q, K, V tensors
+        qkv = self.c_attn.forward(x) # [B, T, 3 * C]
+        q, k, v = qkv.split(split_size=self.d_model, dim=-1) # [B, T, C]
 
-        # (B, n_heads, T, mini_dim)
-        q = q.view(B, T, self.n_heads, mini_head_dim).permute(0, 2, 1, 3)
-        k = k.view(B, T, self.n_heads, mini_head_dim).permute(0, 2, 1, 3)
-        v = v.view(B, T, self.n_heads, mini_head_dim).permute(0, 2, 1, 3)
+        # Multihead Attn ---> [B, nh, T, mini_dim] Split into n_heads
+        # We want tokens to pass through heads, not heads to pass through tokens
+        q = q.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 1, 3)
+        k = k.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 3, 1) # [B, nh, mini_dim, T]
+        v = v.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 1, 3)
 
-        # (B, n_heads, T, T)
-        attn = (q @ k.transpose(-2, -1)) * (1.0/math.sqrt(mini_head_dim))
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        attn = F.softmax(attn, dim = -1)
-
-        # (B, n_heads, T, mini_dims)
-        weighted_sum = attn @ v
-
-        # (B, n_heads, T, mini_dims) ---> (B, T, n_heads, mini_dims) ---> (B, T, n_heads * mini_dims)
-        weighted_sum = weighted_sum.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_heads * mini_head_dim)
-        weighted_sum = self.c_proj(weighted_sum)
-        return weighted_sum
+        # Calulate causal attn scores
+        affinities = (q @ k) / math.sqrt(k.shape[2]) # [B, nh, T, T]
+        affinities = affinities.masked_fill(mask=self.bias[:, :, :T, :T] == 0, value=float('-inf'))
+        affinities = F.softmax(affinities, dim=-1)
         
+        # Apply attn scores and concatenate mini attn heads (n_heads)
+        y = affinities @ v # [B, nh, T, T] @ [B, nh, T, mini_dim] ---> [B, nh, T, mini_dim]
+        y = y.permute(0, 2, 1, 3).reshape(B, T, C) # [B, T, C]
+
+        # Pass though final projection layer
+        y = self.c_proj.forward(y)
+        return y
 
 
-class MLP(torch.nn.Module):
-    def __init__(self, config):
+
+class Block(torch.nn.Module): 
+    def __init__(self, config: GPT2Config):
         super().__init__()
-        self.c_fc = torch.nn.Linear(config.n_embed, 4 * config.n_embed)
-        self.gelu = torch.nn.GELU(approximate='tanh')
-        self.c_proj = torch.nn.Linear(4 * config.n_embed, config.n_embed)
-        self.c_proj.RESIDUAL_SCALE = True
-
-    def forward(self, x): 
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        return x
-
-
-
-class DecoderBlock(torch.nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.ln_1 = torch.nn.LayerNorm(config.n_embed)
+        
+        self.ln_1 = torch.nn.LayerNorm(config.d_model)
         self.attn = Attention(config=config)
-        self.ln_2 = torch.nn.LayerNorm(config.n_embed)
-        self.mlp = MLP(config)
+        self.ln_2 = torch.nn.LayerNorm(config.d_model)
+        self.mlp = MLP(config=config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x)) # Pre-LayerNorm + residual connection (attn)
-        x = x + self.mlp(self.ln_2(x)) # Pre-LayerNorm + residual connection (FFN)
+    
+    def forward(self, x): 
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
+    
 
 
-@dataclass
-class GPT2Config:
-    n_block: int = 1024 # seq_len
-    n_vocab: int = 50257
-    n_embed: int = 768
-    n_heads: int = 12
-    n_layers: int = 12
 
-
-class GPT2(torch.nn.Module):
-    def __init__(self, config):
+class GPT2(torch.nn.Module): 
+    def __init__(self, config: GPT2Config = GPT2Config()): 
         super().__init__()
+
         self.config = config
+        self.transformer = torch.nn.ModuleDict(dict(
+            wte = torch.nn.Embedding(config.vocab_size, config.d_model), 
+            wpe = torch.nn.Embedding(config.block_size, config.d_model), 
+            h = torch.nn.ModuleList([Block(config) for _ in range(config.n_layers)]), 
+            ln_f = torch.nn.LayerNorm(config.d_model), 
+        ))
+        self.lm_head = torch.nn.Linear(config.d_model, config.vocab_size, bias=False)
+        
+        # # This or the other way round, should yiled same result acc to me
+        # self.lm_head.weight = self.transformer.wte.weight
 
-        # Creating hf style dict ---> matching hf var names for GPT2
-        self.transformer = torch.nn.ModuleDict(
-            dict(
-                wte = torch.nn.Embedding(config.n_vocab, config.n_embed), # (seq_len, d_model)
-                wpe = torch.nn.Embedding(config.n_block, config.n_embed), # (seq_len, d_model)
-                h = torch.nn.ModuleList([DecoderBlock(config) for i in range(config.n_layers)]), # number of decoder blocks
-                ln_f = torch.nn.LayerNorm(config.n_embed) # normalizing across channels for each token (B, T, C) ---> (B, T, C_norm)
-            )
-        )
-        self.lm_head = torch.nn.Linear(config.n_embed, config.n_vocab, bias = False) # input: (B, T, n_embed) output: (B, T, n_vocab)
-
-        # Weight tying
         self.transformer.wte.weight = self.lm_head.weight
 
-        self.apply(self._init_weights)
-        
-    def _init_weights(self, module):
-        if isinstance(module, torch.nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std = 0.02)
-        if isinstance(module, torch.nn.Linear): 
-            torch.nn.init.normal_(module.weight, mean = 0, std = 0.02)
-            if module.bias is not None:
-                torch.nn.init.constant_(module.bias, val = 0.0)
-            if hasattr(module, 'RESIDUAL_SCALE'): 
-                module.weight = (2 * self.config.n_layer)**(-0.5) * module.weight
 
-
-    def forward(self, idx, target=None): 
-        B, T = idx.shape
-        # (B, T, C)
-        embs = self.transformer.wte(idx)
-        pos = torch.arange(T, dtype=torch.long, device=idx.device)
-        pos = self.transformer.wpe(pos) # (T, C)
-        x = embs + pos # (B, T, C), pos will get auto broadcasted with batch dim using pytorch broadcasting rules
-
-        for decoder_block in self.transformer.h:
-            x = decoder_block(x)
-        x = self.transformer.ln_f(x)
-        logits = self.lm_head(x) # (B, T, n_vocab)
-        loss = None
-        if target is not None:
-            loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1)) # (B*T, vocab_size), (B*T)
-        return logits, loss
     
+    def forward(self, x): 
+        # x ---> [B, T]
+        B, T = x.shape
+        assert T <= self.config.block_size
+        # pos + tok emb
+        x = self.transformer.wte(x) + self.transformer.wpe(torch.arange(0, T, dtype=torch.long, device=x.device))
+
+        # Pass thorugh transformer block
+        for block in self.transformer.h: 
+            x = block.forward(x)
+        
+        # Final layernorm
+        x = self.transformer.ln_f.forward(x) # [B, T, d_model]
+        logits = self.lm_head.forward(x) # [B, T, vocab_size]
+        return logits
+    
+
+    def _init_weights(self, module: torch.nn.Module): 
+        if isinstance(module, torch.nn.Linear): 
+            # Initial init for linear layers
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # Sclaing for layers accumulating residual path ---> 2 residual streams per block
+            if hasattr(module, 'SCALE_FLAG') and module.SCALE_FLAG == 1: 
+                module.weight = module.weight / math.sqrt(2 * self.config.n_layers)
+            if module.bias is not None: 
+                torch.nn.init.constant_(module.bias, 0.0)
+        if isinstance(module, torch.nn.Embedding): 
+            torch.nn.init.normal_(module.weight, mean=0.0, std = 0.02)
+
 
     # Using Karpathy's code to load the weights from hf and chekcing hte implementation of the model
     @classmethod
@@ -220,13 +147,13 @@ class GPT2(torch.nn.Module):
 
         # n_layer, n_head and n_embd are determined from model_type
         config_args = {
-            'gpt2':         dict(n_layers=12, n_heads=12, n_embed=768),  # 124M params
-            'gpt2-medium':  dict(n_layers=24, n_heads=16, n_embed=1024), # 350M params
-            'gpt2-large':   dict(n_layers=36, n_heads=20, n_embed=1280), # 774M params
-            'gpt2-xl':      dict(n_layers=48, n_heads=25, n_embed=1600), # 1558M params
+            'gpt2':         dict(n_layers=12, n_heads=12, d_model=768),  # 124M params
+            'gpt2-medium':  dict(n_layers=24, n_heads=16, d_model=1024), # 350M params
+            'gpt2-large':   dict(n_layers=36, n_heads=20, d_model=1280), # 774M params
+            'gpt2-xl':      dict(n_layers=48, n_heads=25, d_model=1600), # 1558M params
         }[model_type]
-        config_args['n_vocab'] = 50257 # always 50257 for GPT model checkpoints
-        config_args['n_block'] = 1024 # always 1024 for GPT model checkpoints
+        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
+        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
         # create a from-scratch initialized minGPT model
         print(config_args)
         config = GPT2Config(**config_args)
@@ -258,109 +185,4 @@ class GPT2(torch.nn.Module):
                 assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
-
         return model
-    
-
-
-
-import tiktoken as tk
-
-class ShakespeareLoader(DataLoader):
-    def __init__(self, B, T):
-        self.B = B
-        self.T = T
-        tokenizer = tk.get_encoding('gpt2')
-        with open('gpt2/src/input.txt') as f:
-            text = f.read()
-
-        self.text_tokens = tokenizer.encode(text)
-        self.text_tokens = torch.tensor(self.text_tokens, dtype = torch.long)
-        print(f"Num Tokens: {len(self.text_tokens)}")
-        rem = len(self.text_tokens) % (B * (T + 1))
-        print(f"REM: {rem}")
-        self.text_tokens = self.text_tokens[:-rem]
-        print(f"Truncaated tokens: {len(self.text_tokens)}")
-        self.text_tokens = self.text_tokens.contiguous().view(-1, B, T + 1)
-
-    def __len__(self):
-        return self.text_tokens.shape[0]
-    
-
-    def __iter__(self):
-        idx = 0
-        while idx < self.text_tokens.shape[0]:
-            x, y = self.text_tokens[idx, :, :-1], self.text_tokens[idx, :, 1:]
-            yield x, y
-    
-
-train_loader = ShakespeareLoader(B = 6, T = 1024)
-
-print(len(train_loader))
-
-model = GPT2(GPT2Config())
-
-model = torch.compile(model)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
-
-
-for i, (x, y) in enumerate(train_loader):
-    optimizer.zero_grad()
-    start_time = time.time()
-    logits, loss = model.forward(x, y)
-    loss.backward()
-    optimizer.step()
-    end_time = time.time()
-    print(f'Epoch {i + 1}: {end_time - start_time}')
-    print(f"Training at {(train_loader.B * train_loader.T) / (end_time - start_time)} tok/s")
-    print(f"Iteration {i + 1}: Loss {loss.item()}")
-
-    if i == 5: 
-        break
-
-
-    
-
-
-# logits, loss = model.forward(x, y)
-
-# print(logits.shape)
-# print(loss)
-
-# optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
-# for i in range(50):
-#     optimizer.zero_grad()
-#     logits, loss = model.forward(x, y)
-#     loss.backward()
-#     optimizer.step()
-#     print(f"Iteration {i + 1}: Loss {loss.item()}")
-
-
-# tokenizer = tk.get_encoding('gpt2')
-# prompt = "First Citizen:"
-# tokens = tokenizer.encode(prompt)
-# tokens = torch.tensor(tokens, dtype=torch.long)
-
-# x = tokens.unsqueeze(dim = 0) # (1, T)
-
-# torch.manual_seed(42)
-# with torch.no_grad():
-#     for i in range(30):
-#         # x ---> (B, T)
-#         logits = model.forward(x)[0] # (B, T, vocab_size)
-#         logits = logits[:, -1, :]
-#         probs = F.softmax(logits, dim = -1) # (B, vocab_size)
-#         # This gets the top-k tokens with max probailities
-#         topk_probs, topk_idx = torch.topk(probs, k = 50, dim = -1) # (B, 50)
-#         # torch.multinomial sample randomly according to a probability distribution, output is the index of the values that it sampled
-#         sampled_prob_idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
-#         # Index into the top_k tokens array to get the token ids
-#         token_idx = torch.gather(topk_idx, dim = -1, index=sampled_prob_idx)
-#         x = torch.cat([x, token_idx], dim = -1) # (B, T + 1)
-
-# x = x.tolist()
-# print(len(x), len(x[0]))
-# generations = tokenizer.decode_batch(x)
-# for i in generations:
-#     print(i)

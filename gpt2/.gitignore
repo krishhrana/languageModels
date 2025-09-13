@@ -1,0 +1,7 @@
+Readings/*
+tests/*
+*.ipynb
+*.txt
+.DS_Store
+
+*.__pycache__

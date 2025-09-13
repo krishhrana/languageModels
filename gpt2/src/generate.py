@@ -1,44 +1,51 @@
 from model import GPT2
 import torch
 import torch.nn.functional as F
+import time
 
-# from transformers import AutoModelForCausalLM
-# model = AutoModelForCausalLM.from_pretrained(f'openai-community/gpt2')
+device = 'cpu'
+
+print(f"Using Device: {device}")
 
 model = GPT2.from_pretrained('gpt2')
 print("Loaded Model weights 🎉")
 model.eval()
+model.to(device)
 
 
-import tiktoken as tk
+import tiktoken
+tokenizer = tiktoken.encoding_for_model('gpt2')
+max_tokens = 128
+num_samples = 2
+temperature = 0.9
+eps = 1e-6
 
-num_seqs = 5
-max_num_tokens = 30
+prompt = "I am Donald Trump, I will "
 
-tokenizer = tk.get_encoding('gpt2')
-prompt = "Hello, I'm a language model,"
 tokens = tokenizer.encode(prompt)
-tokens = torch.tensor(tokens, dtype=torch.long)
-
-x = tokens.unsqueeze(dim = 0).repeat([num_seqs, 1])
+tokens = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(dim=0).repeat([num_samples, 1]) # [B, T]
 
 torch.manual_seed(42)
-with torch.no_grad():
-    for i in range(max_num_tokens):
-        # x ---> (B, T)
-        logits = model.forward(x) # (B, T, vocab_size)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits, dim = -1) # (B, vocab_size)
-        # This gets the top-k tokens with max probailities
-        topk_probs, topk_idx = torch.topk(probs, k = 50, dim = -1) # (B, 50)
-        # torch.multinomial sample randomly according to a probability distribution, output is the index of the values that it sampled
-        sampled_prob_idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
-        # Index into the top_k tokens array to get the token ids
-        token_idx = torch.gather(topk_idx, dim = -1, index=sampled_prob_idx)
-        x = torch.cat([x, token_idx], dim = -1) # (B, T + 1)
+start_time = time.perf_counter()
+with torch.no_grad(): 
+    for i in range(max_tokens): 
+        logits = model.forward(tokens) # [B, T, vocab_size]
+        curr_logit = logits[:, -1, :]
+        scaled_logits = curr_logit / (temperature + eps)
+        
+        probs = F.softmax(scaled_logits, dim=-1) # [B, 1, vocab_size]
+        topk_probs, topk_idx = torch.topk(probs, k=50, dim=-1) # (B, 50)
+        sampled_idx = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
+        curr_tokens = torch.gather(topk_idx, dim = -1, index=sampled_idx) # (B, 1)
+        
+        tokens = torch.cat([tokens, curr_tokens], dim = -1)
+        gen = tokenizer.decode_batch(curr_tokens.tolist())
+        
 
-x = x.tolist()
-print(len(x), len(x[0]))
-generations = tokenizer.decode_batch(x)
-for i in generations:
-    print(i)
+print(f"{max_tokens} tokens per {num_samples} sequences took {time.perf_counter() - start_time} secs on {device}")
+
+tokens = tokens.cpu().tolist()
+
+tokens = tokenizer.decode_batch(tokens)
+for i in tokens: 
+    print('>', i)
