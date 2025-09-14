@@ -36,7 +36,7 @@ class Attention(torch.nn.Module):
         self.d_model = config.d_model
         self.n_heads = config.n_heads
 
-        self.register_buffer("bias", tensor=torch.tril(torch.ones(size=(config.block_size, config.block_size))).view(1, 1, config.block_size, config.block_size))
+        self.register_buffer("bias", tensor=torch.tril(torch.ones(size=(config.block_size, config.block_size), dtype=torch.bool)).view(1, 1, config.block_size, config.block_size))
 
 
 
@@ -51,16 +51,18 @@ class Attention(torch.nn.Module):
         # Multihead Attn ---> [B, nh, T, mini_dim] Split into n_heads
         # We want tokens to pass through heads, not heads to pass through tokens
         q = q.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 1, 3)
-        k = k.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 3, 1) # [B, nh, mini_dim, T]
+        k = k.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 1, 3)
         v = v.view(B, T, self.n_heads, C // self.n_heads).permute(0, 2, 1, 3)
 
         # Calulate causal attn scores
-        affinities = (q @ k) / math.sqrt(k.shape[2]) # [B, nh, T, T]
-        affinities = affinities.masked_fill(mask=self.bias[:, :, :T, :T] == 0, value=float('-inf'))
-        affinities = F.softmax(affinities, dim=-1)
+        # affinities = (q @ k.transpose(-2, -1)) / math.sqrt(k.shape[-1]) # [B, nh, T, T]
+        # affinities = affinities.masked_fill(mask=self.bias[:, :, :T, :T] == 0, value=float('-inf'))
+        # affinities = F.softmax(affinities, dim=-1)
         
-        # Apply attn scores and concatenate mini attn heads (n_heads)
-        y = affinities @ v # [B, nh, T, T] @ [B, nh, T, mini_dim] ---> [B, nh, T, mini_dim]
+        # # Apply attn scores and concatenate mini attn heads (n_heads)
+        # y = affinities @ v # [B, nh, T, T] @ [B, nh, T, mini_dim] ---> [B, nh, T, mini_dim]
+        
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.permute(0, 2, 1, 3).reshape(B, T, C) # [B, T, C]
 
         # Pass though final projection layer
