@@ -65,7 +65,7 @@ model = GPT2()
 model = torch.compile(model)
 
 model.to(device=device)
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=1e-4, weight_decay=0.1, betas=(0.9, 0.95))
+optimizer = torch.optim.AdamW(params=model.parameters(), lr=lr_schedule_config.max_lr, weight_decay=0.1, betas=(0.9, 0.95), fused=True)
 scheduler = create_lr_schedule(optimizer=optimizer)
 grad_acc_steps = trainer_config.batch_size // (trainer_config.gpu_batch_size * gpt_config.block_size)
 

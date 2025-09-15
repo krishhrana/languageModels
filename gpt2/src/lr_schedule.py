@@ -6,10 +6,10 @@ import torch
 class LRScheduleConfig():
     max_lr: float = 6e-4
     mult_factor: float = 0.1
-    warmup_steps: int = 40
-    cosine_steps: int = 40
-    max_steps: int = 100
-    linear_start_factor: float = 0.05
+    warmup_steps: int = 50
+    cosine_steps: int = 400
+    max_steps: int = 500
+    linear_start_factor: float = 0.005
 
 
 def create_lr_schedule(optimizer: torch.optim.Optimizer):
