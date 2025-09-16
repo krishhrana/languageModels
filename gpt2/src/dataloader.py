@@ -10,13 +10,14 @@ class DataLoaderLite:
         self.WORLD_SIZE = WORLD_SIZE
 
         # at init load tokens from disk and store them in memory
-        with open('input.txt', 'r') as f:
+        with open('src/input.txt', 'r') as f:
             text = f.read()
         enc = tiktoken.get_encoding('gpt2')
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        if RANK == 0: 
+            print(f"loaded {len(self.tokens)} tokens")
+            print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
 
         # state
         self.current_position = RANK * B * T

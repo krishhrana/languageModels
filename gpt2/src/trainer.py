@@ -9,7 +9,7 @@ import time
 from lr_schedule import create_lr_schedule, LRScheduleConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from src.dataloader import DataLoaderLite
+from dataloader import DataLoaderLite
 
 
 is_ddp = (int(os.environ.get('RANK', -1))) != -1
@@ -23,12 +23,14 @@ if is_ddp:
     device = f"cuda:{local_rank}"
     torch.cuda.set_device(device)
 
+    if master_process: 
+        print("Starting DDP Process")
+
 else: 
     ddp_rank = 0
     world_size = 1
     local_rank = 0
     master_process = True
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 torch.manual_seed(1337)
@@ -75,7 +77,7 @@ for step in range(lr_schedule_config.max_steps):
     loss_acc = 0.0
 
     # No gradient sync while accumulating gradients
-    with DDP.no_sync():
+    with model.no_sync():
         for mini_step in range(grad_acc_steps - 1): 
             loss = process_batch()
             loss = loss / grad_acc_steps
@@ -104,5 +106,9 @@ for step in range(lr_schedule_config.max_steps):
     end_time = time.perf_counter() - start_time
     if master_process:
         print(f"Step: {step} | loss: {loss_acc.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
+
+
+if master_process: 
+    torch.save(model.state_dict(), 'model.checkpoint')
 
 # print(f"{interations} iterations for {GPT2Config()} took {end_time / interations} secs/iter")
