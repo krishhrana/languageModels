@@ -29,6 +29,6 @@ class DataLoaderLite:
         # advance the position in the tensor
         self.current_position += B * T * self.WORLD_SIZE
         # if loading the next batch would be out of bounds, reset
-        if self.current_position + (B * T + 1) > len(self.tokens):
+        if self.current_position + (B * T * self.WORLD_SIZE + 1) > len(self.tokens):
             self.current_position = self.RANK * B * T
         return x, y

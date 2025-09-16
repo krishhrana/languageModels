@@ -41,7 +41,7 @@ torch.set_float32_matmul_precision('high')
 gpt_config = GPT2Config()
 trainer_config = TrainerConfig()
 lr_schedule_config = LRScheduleConfig()
-dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size)
+dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size)
 
 
 model = GPT2().to(device)
