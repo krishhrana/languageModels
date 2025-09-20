@@ -93,7 +93,8 @@ for step in range(lr_schedule_config.max_steps):
 
     # get the average loss for the grad_accum steps across all gpus
     dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
-    
+    ppl = torch.exp(loss_acc)
+
     # This should be same across each GPU as we do grad sync before and model params and grads are identical across GPUs
     norm = torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=1.0)
     curr_lr = scheduler.get_last_lr()
@@ -105,7 +106,7 @@ for step in range(lr_schedule_config.max_steps):
     torch.cuda.synchronize()
     end_time = time.perf_counter() - start_time
     if master_process:
-        print(f"Step: {step} | loss: {loss_acc.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
+        print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
 
 
 if master_process: 
