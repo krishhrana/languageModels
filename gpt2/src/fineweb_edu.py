@@ -6,9 +6,10 @@ import multiprocessing as mp
 import tqdm
 
 tokenizer = tiktoken.encoding_for_model('gpt2')
-fw = load_dataset("HuggingFaceFW/fineweb-edu", name="CC-MAIN-2024-10", split="train")
+fw = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split="train")
 
-max_tokens_per_shard = 1e8 # 100M
+max_tokens_per_shard = int(1e8) # 100M
+progress_bar = None
 
 
 
@@ -36,9 +37,9 @@ with mp.Pool(num_workers) as pool:
         if (token_count + len(tokens)) < max_tokens_per_shard: 
             buffer[token_count: token_count + len(tokens)] = tokens
             token_count = token_count + len(tokens)
-            progress_bar.update(len(tokens))
             if progress_bar is None: 
                 progress_bar = tqdm(total=max_tokens_per_shard, unit="tokens", desc=f"Shard {curr_shard_idx}")
+            progress_bar.update(len(tokens))
 
         else: 
             rem = max_tokens_per_shard - token_count
