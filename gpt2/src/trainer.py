@@ -10,6 +10,7 @@ from lr_schedule import create_lr_schedule, LRScheduleConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from dataloader import DataLoaderLite
+import wandb
 
 
 is_ddp = (int(os.environ.get('RANK', -1))) != -1
@@ -46,6 +47,23 @@ lr_schedule_config = LRScheduleConfig()
 train_dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size, split='train')
 val_dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size, split='val')
 
+if master_process: 
+    run = wandb.init(
+        # Set the wandb entity where your project will be logged (generally your team name).
+        entity="krishrana-intel",
+        # Set the wandb project where this run will be logged.
+        project="gpt2",
+        # Track hyperparameters and run metadata.
+        config={
+            "architecture": "GPT2",
+            "dataset": 'fineweb-edu-10b',
+            "train_config": trainer_config.__dict__, 
+            "gpt_config": gpt_config.__dict__, 
+            "lr_schedule": lr_schedule_config.__dict__
+        }
+)
+
+
 model = GPT2().to(device)
 model = torch.compile(model)
 if is_ddp: 
@@ -72,6 +90,8 @@ class Trainer():
 
         with self.model.no_sync():
             for mini_step in range(self.grad_acc_steps - 1):
+                if master_process: 
+                    print(f"Grad acc step: {mini_step}")
                 loss = self._process_batch(self.tain_loader)
                 loss = loss / grad_acc_steps
                 loss_acc = loss_acc + loss.detach() 
@@ -89,7 +109,7 @@ class Trainer():
 
         # This should be same across each GPU as we do grad sync before and model params and grads are identical across GPUs
         norm = torch.nn.utils.clip_grad_norm_(parameters=self.model.parameters(), max_norm=1.0)
-        curr_lr = scheduler.get_last_lr()
+        curr_lr = scheduler.get_last_lr()[0]
 
         # Each GPU does its own optimizer.step() and scheduler.step()
         optimizer.step()
@@ -98,25 +118,28 @@ class Trainer():
         torch.cuda.synchronize()
         end_time = time.perf_counter() - start_time
         if master_process:
-            print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
-
+            log = {"train_loss": loss_acc.item(), "train_ppl": ppl.item(), "train_norm": norm, "lr": curr_lr, "train_iter_time": end_time}
+            run.log(log)
+            print(f"Step: {step} | loss: {loss_acc.item():04f} | ppl: {ppl.item():04f} | norm: {norm:04f} | lr: {curr_lr:04f} | iter_time: {end_time:04f} secs")
+    
 
     @torch.no_grad()
     def validate(self, step): 
         start_time = time.perf_counter()
         loss_acc = 0
 
-        for mini_step in range(self.grad_acc_steps):
-            loss = self._process_batch(val_dataloader)
-            loss = loss / grad_acc_steps
-            loss_acc = loss_acc + loss.detach()
+        loss = self._process_batch(val_dataloader)
+        loss_acc = loss_acc + loss.detach()
+        
         
         dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
         ppl = torch.exp(loss_acc)
         torch.cuda.synchronize()
         end_time = time.perf_counter() - start_time
         if master_process:
-            print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | iter_time: {end_time} secs")
+            log = {"val_loss": loss_acc.item(), "val_ppl": ppl.item(), "val_iter_time": end_time}
+            run.log(log)
+            print(f"Step: {step} | loss: {loss_acc.item():04f} | ppl: {ppl.item():04f} | iter_time: {end_time:04f} secs")
 
 
 
@@ -135,15 +158,31 @@ class Trainer():
 
 trainer = Trainer(model=model, grad_acc_steps=grad_acc_steps, train_loader=train_dataloader, val_loader=val_dataloader)
 
+last_step = lr_schedule_config.max_steps - 1
+
 # one step ---> 2e19 tokens (0.5M)
 # run validation every 50M tokens
-for step in range(lr_schedule_config.max_steps): 
+for step in range(lr_schedule_config.max_steps):
+    # Train
     trainer.train(step)
+    
+    # Validation
     if step % 100 == 0: 
+        if master_process: 
+            print('STARTING VALIDATION: ')
         model.eval()
         for vs in range(lr_schedule_config.validation_steps):
-            trainer.validate(step)
+            trainer.validate(vs)
+        
+        # Checkpointing
+        if master_process and (step % 5000 == 0 or step == last_step):
+            checkpoint = {
+                'model': model.module.state_dict(),
+                'config': model.module.config,
+                'step': step,
+            }
+            torch.save(checkpoint, f'/home/ubuntu/fineweb/model_checkpoints/"model_{step}.pt"')
         model.train()
-
+    
 if is_ddp: 
     dist.destroy_process_group()

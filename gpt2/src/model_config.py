@@ -13,4 +13,4 @@ class GPT2Config:
 @dataclass
 class TrainerConfig(): 
     batch_size: int = 2**19
-    gpu_batch_size: int = 16
+    gpu_batch_size: int = 64

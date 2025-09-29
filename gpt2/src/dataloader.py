@@ -11,7 +11,7 @@ class DataLoaderLite:
         self.RANK = RANK
         self.WORLD_SIZE = WORLD_SIZE
         self.split = split
-        self.DATASET_PATH = 'fineweb'
+        self.DATASET_PATH = '/home/ubuntu/fineweb/sample_10b'
         
         # init shard
         self.sp_idx = 0
