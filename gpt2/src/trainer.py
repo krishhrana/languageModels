@@ -43,8 +43,8 @@ torch.set_float32_matmul_precision('high')
 gpt_config = GPT2Config()
 trainer_config = TrainerConfig()
 lr_schedule_config = LRScheduleConfig()
-dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size)
-
+train_dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size, split='train')
+val_dataloader = DataLoaderLite(B=trainer_config.gpu_batch_size, T=gpt_config.block_size, RANK=local_rank, WORLD_SIZE=world_size, split='val')
 
 model = GPT2().to(device)
 model = torch.compile(model)
@@ -57,59 +57,93 @@ scheduler = create_lr_schedule(optimizer=optimizer)
 grad_acc_steps = trainer_config.batch_size // (trainer_config.gpu_batch_size * gpt_config.block_size * world_size)
 
 
-def process_batch():
-    batch, y = dataloader.next_batch()
-    B, T = batch.size()
-    batch = batch.to(device=device)
-    y = y.to(device)
-    with torch.autocast(device_type=device, dtype=torch.bfloat16): 
-        logits = model.forward(batch) # [B, T, vocab_size]
-        logits = logits.view(B * T, -1)
-        y = y.view(B*T)
-        loss = F.cross_entropy(input=logits, target=y)
-    return loss
+class Trainer(): 
+    def __init__(self, model, grad_acc_steps, train_loader, val_loader): 
+        self.model = model
+        self.grad_acc_steps = grad_acc_steps
+        self.tain_loader = train_loader
+        self.val_loader = val_loader
 
-# 1 step is 2**19 tokens ---> B*T per grad_acc_step per GPU ---> B*T*G*world_size ---> 16*1024*4*8
-# B*T = 1 mini_batch per GPU
-for step in range(lr_schedule_config.max_steps):
-    start_time = time.perf_counter()
-    optimizer.zero_grad()
-    loss_acc = 0.0
+    # one step
+    def train(self, step): 
+        start_time = time.perf_counter()
+        optimizer.zero_grad()
+        loss_acc = 0.0
 
-    # No gradient sync while accumulating gradients
-    with model.no_sync():
-        for mini_step in range(grad_acc_steps - 1): 
-            loss = process_batch()
+        with self.model.no_sync():
+            for mini_step in range(self.grad_acc_steps - 1):
+                loss = self._process_batch(self.tain_loader)
+                loss = loss / grad_acc_steps
+                loss_acc = loss_acc + loss.detach() 
+                # Accumulates the gradients in .grad param of each tensor (internally does a +=)
+                loss.backward()
+        # Exit context manager, perfom computation for last mini_batch, this time sync gradients
+        loss = self._process_batch(self.tain_loader)
+        loss = loss / grad_acc_steps
+        loss_acc = loss_acc + loss.detach() 
+        loss.backward()
+
+        # get the average loss for the grad_accum steps across all gpus
+        dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
+        ppl = torch.exp(loss_acc)
+
+        # This should be same across each GPU as we do grad sync before and model params and grads are identical across GPUs
+        norm = torch.nn.utils.clip_grad_norm_(parameters=self.model.parameters(), max_norm=1.0)
+        curr_lr = scheduler.get_last_lr()
+
+        # Each GPU does its own optimizer.step() and scheduler.step()
+        optimizer.step()
+        scheduler.step()
+
+        torch.cuda.synchronize()
+        end_time = time.perf_counter() - start_time
+        if master_process:
+            print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
+
+
+    @torch.no_grad()
+    def validate(self, step): 
+        start_time = time.perf_counter()
+        loss_acc = 0
+
+        for mini_step in range(self.grad_acc_steps):
+            loss = self._process_batch(val_dataloader)
             loss = loss / grad_acc_steps
-            loss_acc = loss_acc + loss.detach() 
-            # Accumulates the gradients in .grad param of each tensor (internally does a +=)
-            loss.backward()
+            loss_acc = loss_acc + loss.detach()
+        
+        dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
+        ppl = torch.exp(loss_acc)
+        torch.cuda.synchronize()
+        end_time = time.perf_counter() - start_time
+        if master_process:
+            print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | iter_time: {end_time} secs")
 
-    # Exit context manager, perfom computation for last mini_batch, this time sync gradients
-    loss = process_batch()
-    loss = loss / grad_acc_steps
-    loss_acc = loss_acc + loss.detach() 
-    loss.backward()
 
-    # get the average loss for the grad_accum steps across all gpus
-    dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
-    ppl = torch.exp(loss_acc)
 
-    # This should be same across each GPU as we do grad sync before and model params and grads are identical across GPUs
-    norm = torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=1.0)
-    curr_lr = scheduler.get_last_lr()
+    def _process_batch(self, dataloader):
+        batch, y = dataloader.next_batch()
+        B, T = batch.size()
+        batch = batch.to(device=device)
+        y = y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16): 
+            logits = self.model.forward(batch) # [B, T, vocab_size]
+            logits = logits.view(B * T, -1)
+            y = y.view(B*T)
+            loss = F.cross_entropy(input=logits, target=y)
+        return loss
     
-    # Each GPU does its own optimizer.step() and scheduler.step()
-    optimizer.step()
-    scheduler.step()
 
-    torch.cuda.synchronize()
-    end_time = time.perf_counter() - start_time
-    if master_process:
-        print(f"Step: {step} | loss: {loss_acc.item()} | ppl: {ppl.item()} | norm: {norm} | lr: {curr_lr} | iter_time: {end_time} secs")
+trainer = Trainer(model=model, grad_acc_steps=grad_acc_steps, train_loader=train_dataloader, val_loader=val_dataloader)
 
+# one step ---> 2e19 tokens (0.5M)
+# run validation every 50M tokens
+for step in range(lr_schedule_config.max_steps): 
+    trainer.train(step)
+    if step % 100 == 0: 
+        model.eval()
+        for vs in range(lr_schedule_config.validation_steps):
+            trainer.validate(step)
+        model.train()
 
-if master_process: 
-    torch.save(model.state_dict(), 'model.checkpoint')
-
-# print(f"{interations} iterations for {GPT2Config()} took {end_time / interations} secs/iter")
+if is_ddp: 
+    dist.destroy_process_group()

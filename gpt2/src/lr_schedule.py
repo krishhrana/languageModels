@@ -2,14 +2,16 @@ from torch.optim.lr_scheduler import SequentialLR, CosineAnnealingLR, LinearLR, 
 from dataclasses import dataclass
 import torch 
 
+# Propotional to GPT 3 schedules over 300B tokens
 @dataclass
 class LRScheduleConfig():
     max_lr: float = 6e-4
     mult_factor: float = 0.1
-    warmup_steps: int = 50
-    cosine_steps: int = 400
-    max_steps: int = 500
+    warmup_steps: int = 25 # (12.5M tokens)
+    cosine_steps: int = 16517 # (8.66B tokens)
+    max_steps: int = 19073 # (10B tokens)
     linear_start_factor: float = 0.005
+    validation_steps = 20 # (10M tokens)
 
 
 def create_lr_schedule(optimizer: torch.optim.Optimizer):
