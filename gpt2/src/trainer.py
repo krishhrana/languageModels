@@ -60,8 +60,8 @@ if master_process:
             "train_config": trainer_config.__dict__, 
             "gpt_config": gpt_config.__dict__, 
             "lr_schedule": lr_schedule_config.__dict__
-        }
-)
+            }
+        )
 
 
 model = GPT2().to(device)
@@ -125,22 +125,22 @@ class Trainer():
 
     @torch.no_grad()
     def validate(self, step): 
-        start_time = time.perf_counter()
         loss_acc = 0
-
-        loss = self._process_batch(val_dataloader)
-        loss_acc = loss_acc + loss.detach()
+        for vs in range(lr_schedule_config.validation_steps):
+            start_time = time.perf_counter()
+            loss = self._process_batch(val_dataloader)
+            loss_acc = loss_acc + loss.detach()
         
-        
-        dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG)
+        loss_acc = loss_acc / lr_schedule_config.validation_steps # Avg loss across all steps
+        dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG) # Avg loss across all GPUS
         ppl = torch.exp(loss_acc)
+       
         torch.cuda.synchronize()
         end_time = time.perf_counter() - start_time
         if master_process:
             log = {"val_loss": loss_acc.item(), "val_ppl": ppl.item(), "val_iter_time": end_time}
-            run.log(log)
+            run.log(log, step=step)
             print(f"Step: {step} | loss: {loss_acc.item():04f} | ppl: {ppl.item():04f} | iter_time: {end_time:04f} secs")
-
 
 
     def _process_batch(self, dataloader):
@@ -168,21 +168,18 @@ for step in range(lr_schedule_config.max_steps):
     
     # Validation
     if step % 100 == 0: 
-        if master_process: 
-            print('STARTING VALIDATION: ')
         model.eval()
-        for vs in range(lr_schedule_config.validation_steps):
-            trainer.validate(vs)
-        
-        # Checkpointing
-        if master_process and (step % 5000 == 0 or step == last_step):
-            checkpoint = {
-                'model': model.module.state_dict(),
-                'config': model.module.config,
-                'step': step,
-            }
-            torch.save(checkpoint, f'/home/ubuntu/fineweb/model_checkpoints/"model_{step}.pt"')
+        val_loss = trainer.validate(step)
         model.train()
+        
+    # Checkpointing
+    if master_process and (step % 5000 == 0 or step == last_step):
+        checkpoint = {
+            'model': model.module.state_dict(),
+            'config': model.module.config,
+            'step': step,
+        }
+        torch.save(checkpoint, f'/home/ubuntu/fineweb/model_checkpoints/"model_{step}.pt"')
     
 if is_ddp: 
     dist.destroy_process_group()
