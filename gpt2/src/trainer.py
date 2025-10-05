@@ -119,17 +119,18 @@ class Trainer():
         end_time = time.perf_counter() - start_time
         if master_process:
             log = {"train_loss": loss_acc.item(), "train_ppl": ppl.item(), "train_norm": norm, "lr": curr_lr, "train_iter_time": end_time}
-            run.log(log)
+            run.log(log, step=step)
             print(f"Step: {step} | loss: {loss_acc.item():04f} | ppl: {ppl.item():04f} | norm: {norm:04f} | lr: {curr_lr:04f} | iter_time: {end_time:04f} secs")
     
 
-    @torch.no_grad()
+
     def validate(self, step): 
         loss_acc = 0
-        for vs in range(lr_schedule_config.validation_steps):
-            start_time = time.perf_counter()
-            loss = self._process_batch(val_dataloader)
-            loss_acc = loss_acc + loss.detach()
+        with torch.no_grad(): 
+            for vs in range(lr_schedule_config.validation_steps):
+                start_time = time.perf_counter()
+                loss = self._process_batch(val_dataloader)
+                loss_acc = loss_acc + loss.detach()
         
         loss_acc = loss_acc / lr_schedule_config.validation_steps # Avg loss across all steps
         dist.all_reduce(tensor=loss_acc, op=dist.ReduceOp.AVG) # Avg loss across all GPUS
@@ -138,9 +139,10 @@ class Trainer():
         torch.cuda.synchronize()
         end_time = time.perf_counter() - start_time
         if master_process:
+            print("Validation logs")
             log = {"val_loss": loss_acc.item(), "val_ppl": ppl.item(), "val_iter_time": end_time}
             run.log(log, step=step)
-            print(f"Step: {step} | loss: {loss_acc.item():04f} | ppl: {ppl.item():04f} | iter_time: {end_time:04f} secs")
+            print(f"Step: {step} | val_loss: {loss_acc.item():04f} | val_ppl: {ppl.item():04f} | iter_time: {end_time:04f} secs")
 
 
     def _process_batch(self, dataloader):
@@ -169,7 +171,7 @@ for step in range(lr_schedule_config.max_steps):
     # Validation
     if step % 100 == 0: 
         model.eval()
-        val_loss = trainer.validate(step)
+        trainer.validate(step)
         model.train()
         
     # Checkpointing
